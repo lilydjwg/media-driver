@@ -71,6 +71,7 @@
 #include "mos_utilities.h"
 #include "linux_system_info.h"
 #include "mos_os_specific.h"
+#include "mos_i915_virtio.h"
 
 #ifdef HAVE_VALGRIND
 #include <valgrind.h>
@@ -840,7 +841,7 @@ mos_gem_bo_busy(struct mos_linux_bo *bo)
     memclear(busy);
     busy.handle = bo_gem->gem_handle;
 
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_BUSY, &busy);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_BUSY, &busy);
     if (ret == 0) {
         bo_gem->idle = !busy.busy;
         return busy.busy;
@@ -860,7 +861,7 @@ mos_gem_bo_madvise_internal(struct mos_bufmgr_gem *bufmgr_gem,
     madv.handle = bo_gem->gem_handle;
     madv.madv = state;
     madv.retained = 1;
-    drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_MADVISE, &madv);
+    mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_MADVISE, &madv);
 
     return madv.retained;
 }
@@ -902,7 +903,7 @@ mos_gem_query_items(int fd, struct drm_i915_query_item *items, uint32_t n_items)
     q.num_items = n_items;
     q.items_ptr = (uintptr_t)items;
 
-    return drmIoctl(fd, DRM_IOCTL_I915_QUERY, &q);
+    return mos_i915_ioctl(fd, DRM_IOCTL_I915_QUERY, &q);
 }
 
 /**
@@ -1138,7 +1139,7 @@ retry:
             create.size = bo_size;
             create.extensions = (uintptr_t)(&regions);
 
-            ret = drmIoctl(bufmgr_gem->fd,
+            ret = mos_i915_ioctl(bufmgr_gem->fd,
                     DRM_IOCTL_I915_GEM_CREATE_EXT,
                     &create);
             bo_gem->gem_handle = create.handle;
@@ -1159,7 +1160,7 @@ retry:
                 memclear(create);
                 create.size = bo_size;
                 create.extensions = (uintptr_t)(&set_pat_ext);
-                ret = drmIoctl(bufmgr_gem->fd,
+                ret = mos_i915_ioctl(bufmgr_gem->fd,
                         DRM_IOCTL_I915_GEM_CREATE_EXT,
                         &create);
                 bo_gem->gem_handle = create.handle;
@@ -1180,7 +1181,7 @@ retry:
                 struct drm_i915_gem_create create;
                 memclear(create);
                 create.size = bo_size;
-                ret = drmIoctl(bufmgr_gem->fd,
+                ret = mos_i915_ioctl(bufmgr_gem->fd,
                     DRM_IOCTL_I915_GEM_CREATE,
                     &create);
                 bo_gem->gem_handle = create.handle;
@@ -1335,7 +1336,7 @@ mos_gem_bo_alloc_userptr(struct mos_bufmgr *bufmgr,
     userptr.user_size = alloc_uptr->size;
     userptr.flags = 0;
 
-    ret = drmIoctl(bufmgr_gem->fd,
+    ret = mos_i915_ioctl(bufmgr_gem->fd,
             DRM_IOCTL_I915_GEM_USERPTR,
             &userptr);
     if (ret != 0) {
@@ -1412,7 +1413,7 @@ has_userptr(struct mos_bufmgr_gem *bufmgr_gem)
     userptr.user_size = pgsz;
 
 retry:
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_USERPTR, &userptr);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_USERPTR, &userptr);
     if (ret) {
         if (errno == ENODEV && userptr.flags == 0) {
             userptr.flags = I915_USERPTR_UNSYNCHRONIZED;
@@ -1484,7 +1485,7 @@ mos_bufmgr_bo_gem_create_from_name(struct mos_bufmgr *bufmgr,
 
     memclear(open_arg);
     open_arg.name = handle;
-    ret = drmIoctl(bufmgr_gem->fd,
+    ret = mos_i915_ioctl(bufmgr_gem->fd,
                DRM_IOCTL_GEM_OPEN,
                &open_arg);
     if (ret != 0) {
@@ -1537,7 +1538,7 @@ mos_bufmgr_bo_gem_create_from_name(struct mos_bufmgr *bufmgr,
     memclear(get_tiling);
     if (bufmgr_gem->has_fence_reg) {
         get_tiling.handle = bo_gem->gem_handle;
-        ret = drmIoctl(bufmgr_gem->fd,
+        ret = mos_i915_ioctl(bufmgr_gem->fd,
                DRM_IOCTL_I915_GEM_GET_TILING,
                &get_tiling);
         if (ret != 0) {
@@ -1609,7 +1610,7 @@ mos_gem_bo_free(struct mos_linux_bo *bo)
     /* Close this object */
     memclear(close);
     close.handle = bo_gem->gem_handle;
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_GEM_CLOSE, &close);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_GEM_CLOSE, &close);
     if (ret != 0) {
         MOS_DBG("DRM_IOCTL_GEM_CLOSE %d failed (%s): %s\n",
             bo_gem->gem_handle, bo_gem->name, strerror(errno));
@@ -1782,6 +1783,24 @@ static void mos_gem_bo_unreference(struct mos_linux_bo *bo)
     }
 }
 
+/* Map a GEM object.  On virtio-gpu with an i915 native context the
+ * mmap offset returned by the MMAP_OFFSET/MMAP_GTT ioctls is not
+ * usable; the mapping is established with VIRTGPU_MAP instead.
+ */
+static void *
+mos_gem_bo_mmap(struct mos_bufmgr_gem *bufmgr_gem, uint32_t handle,
+                size_t size, uint64_t offset)
+{
+    if (mos_i915_virtio_is_active(bufmgr_gem->fd))
+    {
+        return mos_i915_gem_mmap(bufmgr_gem->fd, handle, size);
+    }
+
+    return drm_mmap(0, size, PROT_READ | PROT_WRITE,
+                    MAP_SHARED, bufmgr_gem->fd,
+                    offset);
+}
+
 static int
 map_wc(struct mos_linux_bo *bo)
 {
@@ -1813,7 +1832,7 @@ map_wc(struct mos_linux_bo *bo)
         {
             mmap_arg.flags = I915_MMAP_OFFSET_WC;
         }
-        ret = drmIoctl(bufmgr_gem->fd,
+        ret = mos_i915_ioctl(bufmgr_gem->fd,
                    DRM_IOCTL_I915_GEM_MMAP_OFFSET,
                    &mmap_arg);
         if (ret != 0) {
@@ -1825,9 +1844,9 @@ map_wc(struct mos_linux_bo *bo)
         }
 
         /* and mmap it */
-        bo_gem->mem_wc_virtual = drm_mmap(0, bo->size, PROT_READ | PROT_WRITE,
-                           MAP_SHARED, bufmgr_gem->fd,
-                           mmap_arg.offset);
+        bo_gem->mem_wc_virtual = mos_gem_bo_mmap(bufmgr_gem,
+                                    bo_gem->gem_handle, bo->size,
+                                    mmap_arg.offset);
         if (bo_gem->mem_wc_virtual == MAP_FAILED) {
             bo_gem->mem_wc_virtual = nullptr;
             ret = -errno;
@@ -1848,7 +1867,7 @@ map_wc(struct mos_linux_bo *bo)
         /* To indicate the uncached virtual mapping to KMD */
         mmap_arg.flags = I915_MMAP_WC;
         mmap_arg.size = bo->size;
-        ret = drmIoctl(bufmgr_gem->fd,
+        ret = mos_i915_ioctl(bufmgr_gem->fd,
                    DRM_IOCTL_I915_GEM_MMAP,
                    &mmap_arg);
         if (ret != 0) {
@@ -1895,7 +1914,7 @@ mos_gem_bo_map_wc(struct mos_linux_bo *bo) {
         memclear(wait);
         wait.bo_handle = bo_gem->gem_handle;
         wait.timeout_ns = -1; // infinite wait
-        ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_WAIT, &wait);
+        ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_WAIT, &wait);
         if (ret == -1) {
             MOS_DBG("%s:%d: DRM_IOCTL_I915_GEM_WAIT failed (%d)\n",
                 __FILE__, __LINE__, errno);
@@ -1913,7 +1932,7 @@ mos_gem_bo_map_wc(struct mos_linux_bo *bo) {
         set_domain.handle = bo_gem->gem_handle;
         set_domain.read_domains = I915_GEM_DOMAIN_GTT;
         set_domain.write_domain = I915_GEM_DOMAIN_GTT;
-        ret = drmIoctl(bufmgr_gem->fd,
+        ret = mos_i915_ioctl(bufmgr_gem->fd,
                DRM_IOCTL_I915_GEM_SET_DOMAIN,
                &set_domain);
         if (ret != 0) {
@@ -1972,7 +1991,7 @@ drm_export int mos_gem_bo_map(struct mos_linux_bo *bo, int write_enable)
             {
                 mmap_arg.flags = I915_MMAP_OFFSET_WB;
             }
-            ret = drmIoctl(bufmgr_gem->fd,
+            ret = mos_i915_ioctl(bufmgr_gem->fd,
                    DRM_IOCTL_I915_GEM_MMAP_OFFSET,
                    &mmap_arg);
             if (ret != 0) {
@@ -1985,9 +2004,9 @@ drm_export int mos_gem_bo_map(struct mos_linux_bo *bo, int write_enable)
             }
 
             /* and mmap it */
-            bo_gem->mem_virtual = drm_mmap(0, bo->size, PROT_READ | PROT_WRITE,
-                MAP_SHARED, bufmgr_gem->fd,
-                mmap_arg.offset);
+            bo_gem->mem_virtual = mos_gem_bo_mmap(bufmgr_gem,
+                                        bo_gem->gem_handle, bo->size,
+                                        mmap_arg.offset);
             if (bo_gem->mem_virtual == MAP_FAILED) {
                 bo_gem->mem_virtual = nullptr;
                 ret = -errno;
@@ -2002,7 +2021,7 @@ drm_export int mos_gem_bo_map(struct mos_linux_bo *bo, int write_enable)
         memclear(wait);
         wait.bo_handle = bo_gem->gem_handle;
         wait.timeout_ns = -1; // infinite wait
-        ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_WAIT, &wait);
+        ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_WAIT, &wait);
         if (ret == -1) {
             MOS_DBG("%s:%d: DRM_IOCTL_I915_GEM_WAIT failed (%d)\n",
                 __FILE__, __LINE__, errno);
@@ -2019,7 +2038,7 @@ drm_export int mos_gem_bo_map(struct mos_linux_bo *bo, int write_enable)
             memclear(mmap_arg);
             mmap_arg.handle = bo_gem->gem_handle;
             mmap_arg.size = bo->size;
-            ret = drmIoctl(bufmgr_gem->fd,
+            ret = mos_i915_ioctl(bufmgr_gem->fd,
                 DRM_IOCTL_I915_GEM_MMAP,
                 &mmap_arg);
             if (ret != 0) {
@@ -2041,7 +2060,7 @@ drm_export int mos_gem_bo_map(struct mos_linux_bo *bo, int write_enable)
             set_domain.write_domain = I915_GEM_DOMAIN_CPU;
         else
             set_domain.write_domain = 0;
-        ret = drmIoctl(bufmgr_gem->fd,
+        ret = mos_i915_ioctl(bufmgr_gem->fd,
             DRM_IOCTL_I915_GEM_SET_DOMAIN,
             &set_domain);
         if (ret != 0) {
@@ -2092,7 +2111,7 @@ map_gtt(struct mos_linux_bo *bo)
             mmap_arg.flags = I915_MMAP_OFFSET_FIXED;
 
             /* Get the fake offset back... */
-            ret = drmIoctl(bufmgr_gem->fd,
+            ret = mos_i915_ioctl(bufmgr_gem->fd,
                        DRM_IOCTL_I915_GEM_MMAP_OFFSET,
                        &mmap_arg);
             offset = mmap_arg.offset;
@@ -2108,7 +2127,7 @@ map_gtt(struct mos_linux_bo *bo)
             mmap_arg.handle = bo_gem->gem_handle;
 
            /* Get the fake offset back... */
-            ret = drmIoctl(bufmgr_gem->fd,
+            ret = mos_i915_ioctl(bufmgr_gem->fd,
                    DRM_IOCTL_I915_GEM_MMAP_GTT,
                    &mmap_arg);
             offset = mmap_arg.offset;
@@ -2123,9 +2142,9 @@ map_gtt(struct mos_linux_bo *bo)
         }
 
         /* and mmap it */
-        bo_gem->gtt_virtual = drm_mmap(0, bo->size, PROT_READ | PROT_WRITE,
-                           MAP_SHARED, bufmgr_gem->fd,
-                           offset);
+        bo_gem->gtt_virtual = mos_gem_bo_mmap(bufmgr_gem,
+                                    bo_gem->gem_handle, bo->size,
+                                    offset);
         if (bo_gem->gtt_virtual == MAP_FAILED) {
             bo_gem->gtt_virtual = nullptr;
             ret = -errno;
@@ -2170,7 +2189,7 @@ mos_gem_bo_map_gtt(struct mos_linux_bo *bo)
         memclear(wait);
         wait.bo_handle = bo_gem->gem_handle;
         wait.timeout_ns = -1; // infinite wait
-        ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_WAIT, &wait);
+        ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_WAIT, &wait);
         if (ret == -1) {
             MOS_DBG("%s:%d: DRM_IOCTL_I915_GEM_WAIT failed (%d)\n",
                 __FILE__, __LINE__, errno);
@@ -2189,7 +2208,7 @@ mos_gem_bo_map_gtt(struct mos_linux_bo *bo)
         set_domain.handle = bo_gem->gem_handle;
         set_domain.read_domains = I915_GEM_DOMAIN_GTT;
         set_domain.write_domain = I915_GEM_DOMAIN_GTT;
-        ret = drmIoctl(bufmgr_gem->fd,
+        ret = mos_i915_ioctl(bufmgr_gem->fd,
                DRM_IOCTL_I915_GEM_SET_DOMAIN,
                &set_domain);
         if (ret != 0) {
@@ -2286,7 +2305,7 @@ static int mos_gem_bo_unmap(struct mos_linux_bo *bo)
          */
         memclear(sw_finish);
         sw_finish.handle = bo_gem->gem_handle;
-        ret = drmIoctl(bufmgr_gem->fd,
+        ret = mos_i915_ioctl(bufmgr_gem->fd,
                    DRM_IOCTL_I915_GEM_SW_FINISH,
                    &sw_finish);
         ret = ret == -1 ? -errno : 0;
@@ -2380,7 +2399,7 @@ mos_gem_bo_wait(struct mos_linux_bo *bo, int64_t timeout_ns)
     memclear(wait);
     wait.bo_handle = bo_gem->gem_handle;
     wait.timeout_ns = timeout_ns;
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_WAIT, &wait);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_WAIT, &wait);
     if (ret == -1)
         return -errno;
 
@@ -2408,7 +2427,7 @@ mos_gem_bo_start_gtt_access(struct mos_linux_bo *bo, int write_enable)
         memclear(wait);
         wait.bo_handle = bo_gem->gem_handle;
         wait.timeout_ns = -1; // infinite wait
-        ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_WAIT, &wait);
+        ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_WAIT, &wait);
         if (ret == -1) {
             MOS_DBG("%s:%d: DRM_IOCTL_I915_GEM_WAIT failed (%d)\n",
                 __FILE__, __LINE__, errno);
@@ -2418,7 +2437,7 @@ mos_gem_bo_start_gtt_access(struct mos_linux_bo *bo, int write_enable)
         set_domain.handle = bo_gem->gem_handle;
         set_domain.read_domains = I915_GEM_DOMAIN_GTT;
         set_domain.write_domain = write_enable ? I915_GEM_DOMAIN_GTT : 0;
-        ret = drmIoctl(bufmgr_gem->fd,
+        ret = mos_i915_ioctl(bufmgr_gem->fd,
                DRM_IOCTL_I915_GEM_SET_DOMAIN,
                &set_domain);
         if (ret != 0) {
@@ -2469,7 +2488,7 @@ mos_bufmgr_gem_destroy(struct mos_bufmgr *bufmgr)
     if (bufmgr_gem->userptr_active.ptr) {
         memclear(close_bo);
         close_bo.handle = bufmgr_gem->userptr_active.handle;
-        ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_GEM_CLOSE, &close_bo);
+        ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_GEM_CLOSE, &close_bo);
         free(bufmgr_gem->userptr_active.ptr);
         if (ret)
             fprintf(stderr,
@@ -2483,6 +2502,14 @@ mos_bufmgr_gem_destroy(struct mos_bufmgr *bufmgr)
     if (bufmgr_gem->mem_profiler_fd != -1)
     {
         close(bufmgr_gem->mem_profiler_fd);
+    }
+
+    /* Tear down the virtio-gpu native context proxy (if any) after all
+     * buffer objects have been closed.
+     */
+    if (mos_i915_virtio_is_active(bufmgr_gem->fd))
+    {
+        mos_i915_virtio_fini(bufmgr_gem->fd);
     }
 
     free(bufmgr);
@@ -3031,7 +3058,7 @@ do_exec2(struct mos_linux_bo *bo, int used, struct mos_linux_context *ctx,
     if (bufmgr_gem->no_exec)
         goto skip_execution;
 
-    ret = drmIoctl(bufmgr_gem->fd,
+    ret = mos_i915_ioctl(bufmgr_gem->fd,
                DRM_IOCTL_I915_GEM_EXECBUFFER2_WR,
                &execbuf);
     if (ret != 0) {
@@ -3246,7 +3273,7 @@ do_exec3(struct mos_linux_bo **bo, int _num_bo, struct mos_linux_context *ctx,
     if (bufmgr_gem->no_exec)
         goto skip_execution;
 
-   ret = drmIoctl(bufmgr_gem->fd,
+   ret = mos_i915_ioctl(bufmgr_gem->fd,
                DRM_IOCTL_I915_GEM_EXECBUFFER2_WR,
                &execbuf);
 
@@ -3370,7 +3397,7 @@ mos_gem_bo_set_tiling_internal(struct mos_linux_bo *bo,
     set_tiling.tiling_mode = tiling_mode;
     set_tiling.stride = stride;
 
-    ret = drmIoctl(bufmgr_gem->fd,
+    ret = mos_i915_ioctl(bufmgr_gem->fd,
             DRM_IOCTL_I915_GEM_SET_TILING,
             &set_tiling);
     if (ret == -1)
@@ -3468,7 +3495,14 @@ mos_gem_bo_create_from_prime(struct mos_bufmgr *bufmgr, struct mos_drm_bo_alloc_
     drmMMListHead *list;
 
     pthread_mutex_lock(&bufmgr_gem->lock);
-    ret = drmPrimeFDToHandle(bufmgr_gem->fd, prime_fd, &handle);
+    {
+        struct drm_prime_handle args;
+        memset(&args, 0, sizeof(args));
+        args.fd = prime_fd;
+        ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_PRIME_FD_TO_HANDLE,
+                             &args);
+        handle = args.handle;
+    }
     if (ret) {
         MOS_DBG("create_from_prime: failed to obtain handle from fd: %s\n", strerror(errno));
         pthread_mutex_unlock(&bufmgr_gem->lock);
@@ -3529,7 +3563,7 @@ mos_gem_bo_create_from_prime(struct mos_bufmgr *bufmgr, struct mos_drm_bo_alloc_
     memclear(get_tiling);
     if(bufmgr_gem->has_fence_reg) {
         get_tiling.handle = bo_gem->gem_handle;
-        ret = drmIoctl(bufmgr_gem->fd,
+        ret = mos_i915_ioctl(bufmgr_gem->fd,
                DRM_IOCTL_I915_GEM_GET_TILING,
                &get_tiling);
         if (ret != 0) {
@@ -3566,9 +3600,16 @@ mos_gem_bo_export_to_prime(struct mos_linux_bo *bo, int *prime_fd)
                 DRMLISTADDTAIL(&bo_gem->name_list, &bufmgr_gem->named);
     pthread_mutex_unlock(&bufmgr_gem->lock);
 
-    if (drmPrimeHandleToFD(bufmgr_gem->fd, bo_gem->gem_handle,
-                   DRM_CLOEXEC, prime_fd) != 0)
-        return -errno;
+    {
+        struct drm_prime_handle args;
+        memset(&args, 0, sizeof(args));
+        args.handle = bo_gem->gem_handle;
+        args.flags = DRM_CLOEXEC;
+        if (mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_PRIME_HANDLE_TO_FD,
+                           &args) != 0)
+            return -errno;
+        *prime_fd = args.fd;
+    }
 
     bo_gem->reusable = false;
 
@@ -3590,7 +3631,7 @@ mos_gem_bo_flink(struct mos_linux_bo *bo, uint32_t * name)
 
         pthread_mutex_lock(&bufmgr_gem->lock);
 
-        ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_GEM_FLINK, &flink);
+        ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_GEM_FLINK, &flink);
         if (ret != 0) {
             pthread_mutex_unlock(&bufmgr_gem->lock);
             return -errno;
@@ -3994,7 +4035,7 @@ get_pci_device_id(struct mos_bufmgr_gem *bufmgr_gem)
     memclear(gp);
     gp.param = I915_PARAM_CHIPSET_ID;
     gp.value = &devid;
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
     if (ret) {
         fprintf(stderr, "get chip id failed: %d [%d]\n", ret, errno);
         fprintf(stderr, "param: %d, val: %d\n", gp.param, *gp.value);
@@ -4101,7 +4142,7 @@ mos_gem_context_create(struct mos_bufmgr *bufmgr)
         return nullptr;
 
     memclear(create);
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_CONTEXT_CREATE, &create);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_CONTEXT_CREATE, &create);
     if (ret != 0) {
         MOS_DBG("DRM_IOCTL_I915_GEM_CONTEXT_CREATE failed: %s\n",
             strerror(errno));
@@ -4131,7 +4172,7 @@ mos_gem_context_destroy(struct mos_linux_context *ctx)
 
     bufmgr_gem = (struct mos_bufmgr_gem *)ctx->bufmgr;
     destroy.ctx_id = ctx->ctx_id;
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_CONTEXT_DESTROY,
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_CONTEXT_DESTROY,
                &destroy);
     if (ret != 0)
         fprintf(stderr, "DRM_IOCTL_I915_GEM_CONTEXT_DESTROY failed: %s\n",
@@ -4157,7 +4198,7 @@ mos_bufmg_get_reset_stats(struct mos_linux_context *ctx,
 
     bufmgr_gem = (struct mos_bufmgr_gem *)ctx->bufmgr;
     stats.ctx_id = ctx->ctx_id;
-    ret = drmIoctl(bufmgr_gem->fd,
+    ret = mos_i915_ioctl(bufmgr_gem->fd,
                DRM_IOCTL_I915_GET_RESET_STATS,
                &stats);
     if (ret == 0) {
@@ -4228,7 +4269,7 @@ mos_bufmgr_get_context_param_sseu(struct mos_linux_context *ctx,
     context_param.value = (uint64_t) sseu;
     context_param.size = sizeof(struct drm_i915_gem_context_param_sseu);
 
-    ret = drmIoctl(bufmgr_gem->fd,
+    ret = mos_i915_ioctl(bufmgr_gem->fd,
             DRM_IOCTL_I915_GEM_CONTEXT_GETPARAM,
             &context_param);
 
@@ -4253,7 +4294,7 @@ mos_bufmgr_set_context_param_sseu(struct mos_linux_context *ctx,
     context_param.value = (uint64_t) &sseu;
     context_param.size = sizeof(struct drm_i915_gem_context_param_sseu);
 
-    ret = drmIoctl(bufmgr_gem->fd,
+    ret = mos_i915_ioctl(bufmgr_gem->fd,
                DRM_IOCTL_I915_GEM_CONTEXT_SETPARAM,
                &context_param);
 
@@ -4279,7 +4320,7 @@ mos_gem_get_context_param(struct mos_linux_context *ctx,
     context_param.param = param;
     context_param.value = 0;
 
-    ret = drmIoctl(bufmgr_gem->fd,
+    ret = mos_i915_ioctl(bufmgr_gem->fd,
             DRM_IOCTL_I915_GEM_CONTEXT_GETPARAM,
             &context_param);
     *value = context_param.value;
@@ -4306,7 +4347,7 @@ mos_gem_set_context_param(struct mos_linux_context *ctx,
     context_param.param = param;
     context_param.value = value;
 
-    ret = drmIoctl(bufmgr_gem->fd,
+    ret = mos_i915_ioctl(bufmgr_gem->fd,
                DRM_IOCTL_I915_GEM_CONTEXT_SETPARAM,
                &context_param);
 
@@ -4325,7 +4366,7 @@ mos_bufmg_reg_read(struct mos_bufmgr *bufmgr,
     memclear(reg_read);
     reg_read.offset = offset;
 
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_REG_READ, &reg_read);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_REG_READ, &reg_read);
 
     *result = reg_read.val;
     return ret;
@@ -4427,7 +4468,7 @@ mos_gem_context_create_ext(struct mos_bufmgr *bufmgr, __u32 flags, bool bContext
         create.flags = flags|I915_CONTEXT_CREATE_FLAGS_USE_EXTENSIONS;
         create.extensions = (uintptr_t)&p_norecover;
     }
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_CONTEXT_CREATE_EXT, &create);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_CONTEXT_CREATE_EXT, &create);
     if (ret != 0) {
         MOS_DBG("DRM_IOCTL_I915_GEM_CONTEXT_CREATE failed: %s\n",
             strerror(errno));
@@ -4459,7 +4500,7 @@ static __u32 mos_gem_vm_create(struct mos_bufmgr *bufmgr)
 
     memset(vm, 0, sizeof(*vm));
 
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_VM_CREATE, vm);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_VM_CREATE, vm);
     if (ret != 0) {
         MOS_DBG("DRM_IOCTL_I915_GEM_VM_CREATE failed: %s\n",
             strerror(errno));
@@ -4494,7 +4535,7 @@ static void mos_gem_vm_destroy(struct mos_bufmgr *bufmgr, __u32 vm_id)
     }
 
     vm->vm_id = vm_id;
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_VM_DESTROY, vm);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_VM_DESTROY, vm);
     if (ret != 0) {
         MOS_DBG("DRM_IOCTL_I915_GEM_VM_DESTROY failed: %s\n",
             strerror(errno));
@@ -4552,7 +4593,7 @@ mos_gem_context_create_shared(struct mos_bufmgr *bufmgr,
         create.flags = flags|I915_CONTEXT_CREATE_FLAGS_USE_EXTENSIONS;
         create.extensions = (uintptr_t)&p_norecover;
     }
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_CONTEXT_CREATE_EXT, &create);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_CONTEXT_CREATE_EXT, &create);
     if (ret != 0) {
         MOS_DBG("DRM_IOCTL_I915_GEM_CONTEXT_CREATE failed: %s\n",
             strerror(errno));
@@ -4597,7 +4638,7 @@ static int mos_bufmgr_query_engines_count(struct mos_bufmgr *bufmgr,
     query.num_items = 1;
     query.items_ptr = (uintptr_t)&query_item;
 
-    ret = drmIoctl(fd, DRM_IOCTL_I915_QUERY, &query);
+    ret = mos_i915_ioctl(fd, DRM_IOCTL_I915_QUERY, &query);
     if (ret || query_item.length == 0)
     {
         *nengine = 0;
@@ -4623,7 +4664,7 @@ static int mos_bufmgr_query_engines_count(struct mos_bufmgr *bufmgr,
     query.num_items = 1;
     query.items_ptr = (uintptr_t)&query_item;
 
-    ret = drmIoctl(fd, DRM_IOCTL_I915_QUERY, &query);
+    ret = mos_i915_ioctl(fd, DRM_IOCTL_I915_QUERY, &query);
 
     *nengine = ret ? 0 : engines->num_engines;
     
@@ -4659,7 +4700,7 @@ static int mos_bufmgr_query_engines(struct mos_bufmgr *bufmgr,
     query.num_items = 1;
     query.items_ptr = (uintptr_t)&query_item;
 
-    ret = drmIoctl(fd, DRM_IOCTL_I915_QUERY, &query);
+    ret = mos_i915_ioctl(fd, DRM_IOCTL_I915_QUERY, &query);
     if (ret)
     {
         goto fini;
@@ -4686,7 +4727,7 @@ static int mos_bufmgr_query_engines(struct mos_bufmgr *bufmgr,
     query.num_items = 1;
     query.items_ptr = (uintptr_t)&query_item;
 
-    ret = drmIoctl(fd, DRM_IOCTL_I915_QUERY, &query);
+    ret = mos_i915_ioctl(fd, DRM_IOCTL_I915_QUERY, &query);
     if (ret)
     {
         goto fini;
@@ -5217,7 +5258,7 @@ mos_bufmgr_enable_turbo_boost(struct mos_bufmgr *bufmgr)
     MOS_ZeroMemory( &ctxParam, sizeof( ctxParam ) );
     ctxParam.param = I915_CONTEXT_PRIVATE_PARAM_BOOST;
     ctxParam.value = 1;
-    retVal = drmIoctl(bufmgr_gem->fd,
+    retVal = mos_i915_ioctl(bufmgr_gem->fd,
                       DRM_IOCTL_I915_GEM_CONTEXT_SETPARAM, &ctxParam );
 }
 
@@ -5236,12 +5277,25 @@ mos_bufmgr_gem_init_i915(int fd, int batch_size)
     int ret, tmp;
     uint8_t alloc_mode;
     bool exec2 = false;
+    bool virtio_i915 = false;
 
     pthread_mutex_lock(&bufmgr_list_mutex);
 
     bufmgr_gem = mos_bufmgr_gem_find(fd);
     if (bufmgr_gem)
         goto exit;
+
+    /* When running inside a VM with virtio-gpu exposing an i915 native
+     * context, set up the vdrm proxy before any ioctl is issued.  All
+     * i915 ioctls are then routed through mos_i915_ioctl().
+     */
+    virtio_i915 = mos_i915_virtio_probe(fd);
+    if (virtio_i915) {
+        if (mos_i915_virtio_init(fd) != 0) {
+            pthread_mutex_unlock(&bufmgr_list_mutex);
+            return nullptr;
+        }
+    }
 
     bufmgr_gem = (struct mos_bufmgr_gem *)calloc(1, sizeof(*bufmgr_gem));
     if (bufmgr_gem == nullptr)
@@ -5357,7 +5411,7 @@ mos_bufmgr_gem_init_i915(int fd, int batch_size)
     }
 
     memclear(aperture);
-    ret = drmIoctl(bufmgr_gem->fd,
+    ret = mos_i915_ioctl(bufmgr_gem->fd,
                DRM_IOCTL_I915_GEM_GET_APERTURE,
                &aperture);
 
@@ -5382,6 +5436,10 @@ mos_bufmgr_gem_init_i915(int fd, int batch_size)
         {
             close(bufmgr_gem->mem_profiler_fd);
         }
+        if (virtio_i915)
+        {
+            mos_i915_virtio_fini(fd);
+        }
         free(bufmgr_gem);
         bufmgr_gem = nullptr;
         goto exit;
@@ -5391,64 +5449,64 @@ mos_bufmgr_gem_init_i915(int fd, int batch_size)
     gp.value = &tmp;
 
     gp.param = I915_PARAM_HAS_EXECBUF2;
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
     if (!ret)
         exec2 = true;
 
     gp.param = I915_PARAM_HAS_BSD;
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
     bufmgr_gem->has_bsd = ret == 0;
 
     gp.param = I915_PARAM_HAS_BSD2;
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
     bufmgr_gem->has_bsd2 = (ret == 0 && *gp.value != 0);
 
     gp.param = I915_PARAM_HAS_BLT;
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
     bufmgr_gem->has_blt = ret == 0;
 
     gp.param = I915_PARAM_HAS_RELAXED_FENCING;
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
     bufmgr_gem->has_relaxed_fencing = ret == 0;
 
     bufmgr_gem->bufmgr.bo_alloc_userptr = check_bo_alloc_userptr;
 
     gp.param = I915_PARAM_HAS_WAIT_TIMEOUT;
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
     bufmgr_gem->has_wait_timeout = ret == 0;
 
     gp.param = I915_PARAM_HAS_LLC;
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
     bufmgr_gem->has_llc = *gp.value;
 
     gp.param = I915_PARAM_HAS_VEBOX;
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
     bufmgr_gem->has_vebox = (ret == 0) & (*gp.value > 0);
 
     gp.param = I915_PARAM_MMAP_VERSION;
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
     bufmgr_gem->has_ext_mmap = (ret == 0) & (*gp.value > 0);
 
     gp.param = I915_PARAM_NUM_FENCES_AVAIL;
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
     bufmgr_gem->has_fence_reg = (ret == 0) & (*gp.value > 0);
 
     gp.param = I915_PARAM_HAS_EXEC_SOFTPIN;
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
     if (ret == 0 && *gp.value > 0) {
         bufmgr_gem->bufmgr.bo_set_softpin        = mos_gem_bo_set_softpin;
         bufmgr_gem->bufmgr.bo_add_softpin_target = mos_gem_bo_add_softpin_target;
     }
 
     gp.param = I915_PARAM_HAS_EXEC_ASYNC;
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
     if (ret == 0 && *gp.value > 0) {
         bufmgr_gem->bufmgr.set_object_async      = mos_gem_bo_set_object_async;
         bufmgr_gem->bufmgr.set_exec_object_async = mos_gem_bo_set_exec_object_async;
     }
 
     gp.param = I915_PARAM_HAS_EXEC_CAPTURE;
-    ret      = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
+    ret      = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GETPARAM, &gp);
     if (ret == 0 && *gp.value > 0)
     {
         bufmgr_gem->bufmgr.set_object_capture      = mos_gem_bo_set_object_capture;
@@ -5459,17 +5517,17 @@ mos_bufmgr_gem_init_i915(int fd, int batch_size)
     }
 
     gp.param = I915_PARAM_MMAP_GTT_VERSION;
-    ret =  drmIoctl(fd, DRM_IOCTL_I915_GETPARAM, &gp);
+    ret =  mos_i915_ioctl(fd, DRM_IOCTL_I915_GETPARAM, &gp);
     bufmgr_gem->has_mmap_offset  =  (ret == 0) && (*gp.value >= 4);
 
     gp.param = I915_PARAM_CS_TIMESTAMP_FREQUENCY;
-    ret =  drmIoctl(fd, DRM_IOCTL_I915_GETPARAM, &gp);
+    ret =  mos_i915_ioctl(fd, DRM_IOCTL_I915_GETPARAM, &gp);
     bufmgr_gem->ts_freq   =  (ret == 0) ? *gp.value : 0;
 
     struct drm_i915_gem_context_param context_param;
     memset(&context_param, 0, sizeof(context_param));
     context_param.param = I915_CONTEXT_PARAM_GTT_SIZE;
-    ret = drmIoctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_CONTEXT_GETPARAM, &context_param);
+    ret = mos_i915_ioctl(bufmgr_gem->fd, DRM_IOCTL_I915_GEM_CONTEXT_GETPARAM, &context_param);
     if (ret == 0){
         uint64_t gtt_size_4g = (uint64_t)1 << 32;
         if (context_param.value > gtt_size_4g)
@@ -5498,6 +5556,12 @@ mos_bufmgr_gem_init_i915(int fd, int batch_size)
 
     DRMLISTADD(&bufmgr_gem->managers, &bufmgr_list);
 
+    /* On bare metal the bufmgr may later enable softpin via
+     * bufmgr_gem->bufmgr.bo_set_softpin.  On virtio-gpu the host does
+     * not accept guest-assigned GPU addresses, so softpin must NOT be
+     * enabled: the host assigns offsets itself and relocations are
+     * translated by the vdrm layer.
+     */
     bufmgr_gem->use_softpin = false;
     mos_vma_heap_init(&bufmgr_gem->vma_heap[MEMZONE_SYS], MEMZONE_SYS_START, MEMZONE_SYS_SIZE);
     mos_vma_heap_init(&bufmgr_gem->vma_heap[MEMZONE_DEVICE], MEMZONE_DEVICE_START, MEMZONE_DEVICE_SIZE);
@@ -5539,7 +5603,7 @@ int mos_get_param(int fd, int32_t param, uint32_t *param_value)
     gp.param = param;
     gp.value = (int32_t *)param_value;
 
-    return drmIoctl(fd, DRM_IOCTL_I915_GETPARAM, &gp) == 0;
+    return mos_i915_ioctl(fd, DRM_IOCTL_I915_GETPARAM, &gp) == 0;
 }
 
 static int mos_bufmgr_get_driver_info(struct mos_bufmgr *bufmgr, struct LinuxDriverInfo *drvInfo)

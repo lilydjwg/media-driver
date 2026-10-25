@@ -21,6 +21,7 @@
 media_include_subdirectory(include)
 set(TMP_SOURCES_
     ${CMAKE_CURRENT_LIST_DIR}/mos_bufmgr_api.c
+    ${CMAKE_CURRENT_LIST_DIR}/mos_i915_virtio.c
     ${CMAKE_CURRENT_LIST_DIR}/xf86drm.c
     ${CMAKE_CURRENT_LIST_DIR}/xf86drmHash.c
     ${CMAKE_CURRENT_LIST_DIR}/xf86drmMode.c
@@ -34,7 +35,21 @@ if(NOT ENABLE_PRODUCTION_KMD)
     )
 endif()
 
+set(TMP_HEADERS_
+    ${CMAKE_CURRENT_LIST_DIR}/mos_i915_virtio.h
+)
+
 set(SOFTLET_MOS_COMMON_SOURCES_
     ${SOFTLET_MOS_COMMON_SOURCES_}
     ${TMP_SOURCES_}
+ )
+
+set(SOFTLET_MOS_COMMON_HEADERS_
+    ${SOFTLET_MOS_COMMON_HEADERS_}
+    ${TMP_HEADERS_}
+ )
+
+set(SOFTLET_MOS_PUBLIC_INCLUDE_DIRS_
+    ${SOFTLET_MOS_PUBLIC_INCLUDE_DIRS_}
+    ${CMAKE_CURRENT_LIST_DIR}
  )

@@ -32,6 +32,7 @@
 #include "drm.h"
 #include "libdrm_macros.h"
 #include "media_skuwa_specific.h"
+#include "mos_i915_virtio.h"
 
 #define S_SUCCESS 0
 
@@ -442,6 +443,14 @@ static inline int mos_query_device_type(int fd)
     else if(strcmp("xe", name) == 0)
     {
         device_type = DEVICE_TYPE_XE;
+    }
+    /* "virtio_gpu" is truncated to "virt" by name_len above; the capset
+     * probe below confirms the host native context type.  This check is
+     * also correct when name_len has been enlarged by other patches.
+     */
+    else if(strncmp(name, "virt", 4) == 0 && mos_i915_virtio_probe(fd))
+    {
+        device_type = DEVICE_TYPE_I915;
     }
     else
     {
